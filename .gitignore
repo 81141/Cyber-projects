@@ -17,3 +17,12 @@ __pycache__/
 # OS files
 .DS_Store
 Thumbs.db
+
+# LaTeX auxiliary files
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.synctex.gz
+*.out
+*.toc
