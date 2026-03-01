@@ -8,7 +8,7 @@ import vt
 import time
 
 
-df = pd.read_csv("03_ML_URL_Fraud/data/lexical_features.csv")
+df = pd.read_csv("../data/lexical_features.csv")
 df = df.sample(n=2_000, random_state=42)
 
 
@@ -18,8 +18,8 @@ def load_key(path):
     with open(path, "r") as f:
         return f.read().strip()
 
-IPINFO_KEY = load_key("03_ML_URL_Fraud/keys/API_TOKEN.txt")
-VT_API_KEY = load_key("03_ML_URL_Fraud/keys/VT_API.txt")
+IPINFO_KEY = load_key("../keys/API_TOKEN.txt")
+VT_API_KEY = load_key("../keys/VT_API.txt")
 
 handler = ipinfo.getHandler(IPINFO_KEY)
 client = vt.Client(VT_API_KEY)
@@ -107,3 +107,17 @@ df["suspicious_domain"] = (
     (df["domain_age_days"] < 30) &
     (df["is_dga_like"] == 1)
 ).astype(int)
+
+
+
+from pathlib import Path
+
+
+output_file = Path("../data/Passive_features.csv")
+
+if output_file.exists():
+    output_file.unlink()
+
+# Save the new file
+df.to_csv(output_file, index=False)
+
