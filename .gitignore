@@ -30,3 +30,7 @@ Thumbs.db
 *.csv
 
 data/*.csv
+
+keys/*.txt
+*VT_API.txt
+*API_TOKEN.txt

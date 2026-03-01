@@ -1,0 +1,109 @@
+import whois
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import socket
+import ipinfo
+import vt
+import time
+
+
+df = pd.read_csv("03_ML_URL_Fraud/data/lexical_features.csv")
+df = df.sample(n=2_000, random_state=42)
+
+
+#load API keys
+
+def load_key(path):
+    with open(path, "r") as f:
+        return f.read().strip()
+
+IPINFO_KEY = load_key("03_ML_URL_Fraud/keys/API_TOKEN.txt")
+VT_API_KEY = load_key("03_ML_URL_Fraud/keys/VT_API.txt")
+
+handler = ipinfo.getHandler(IPINFO_KEY)
+client = vt.Client(VT_API_KEY)
+
+
+# WHOIS domain age
+
+whois_cache = {}
+
+def get_domain_age(domain):
+    if domain in whois_cache:
+        return whois_cache[domain]
+
+    try:
+        w = whois.whois(domain)
+        creation = w.creation_date
+        if isinstance(creation, list):
+            creation = creation[0]
+        age = (datetime.now() - creation).days if creation else -1
+    except Exception:
+        age = -1
+
+    whois_cache[domain] = age
+    time.sleep(0.1)
+    return age
+
+df["domain_age_days"] = df["domain"].apply(get_domain_age)
+
+
+# DNS -→ IP
+
+def resolve_ip(domain):
+    try:
+        return socket.gethostbyname(domain)
+    except:
+        return None
+
+df["ip"] = df["domain"].apply(resolve_ip)
+
+# IP OSINT
+
+def get_ip_osint(ip):
+    if not ip:
+        return pd.Series([None, None, None])
+    try:
+        details = handler.getDetails(ip)
+        return pd.Series([details.org, details.country, details.region])
+    except:
+        return pd.Series([None, None, None])
+
+df[["asn_org", "country", "region"]] = df["ip"].apply(get_ip_osint)
+
+
+# VirusTotal : the key limit to amount of data 
+
+vt_cache = {}
+
+def vt_domain_score(domain):
+    if domain in vt_cache:
+        return vt_cache[domain]
+
+    try:
+        obj = client.get_object(f"/domains/{domain}")
+        stats = obj.last_analysis_stats
+        result = (stats["malicious"], stats["suspicious"])
+    except:
+        result = (-1, -1)
+
+    vt_cache[domain] = result
+    time.sleep(0.25)
+    return result
+
+df[["vt_malicious", "vt_suspicious"]] = df["domain"].apply(
+    lambda d: pd.Series(vt_domain_score(d))
+)
+
+client.close()
+
+
+# Derived intelligence
+
+df["is_dga_like"] = (df["domain_entropy"] > 3.8).astype(int)
+
+df["suspicious_domain"] = (
+    (df["domain_age_days"] < 30) &
+    (df["is_dga_like"] == 1)
+).astype(int)
