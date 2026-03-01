@@ -85,19 +85,21 @@ def vt_domain_score(domain):
         obj = client.get_object(f"/domains/{domain}")
         stats = obj.last_analysis_stats
         result = (stats["malicious"], stats["suspicious"])
-    except:
+
+    except vt.error.APIError as e:
+        print(f"[VT ERROR] {domain}: {e.code} - {e}")  # see what's actually failing
+        if e.code == "NotFoundError":
+            result = (0, 0) 
+        else:
+            result = (-1, -1)
+
+    except Exception as e:
+        print(f"[UNEXPECTED] {domain}: {e}")
         result = (-1, -1)
 
     vt_cache[domain] = result
-    time.sleep(0.25)
+    time.sleep(15)  
     return result
-
-df[["vt_malicious", "vt_suspicious"]] = df["domain"].apply(
-    lambda d: pd.Series(vt_domain_score(d))
-)
-
-client.close()
-
 
 # Derived intelligence
 
