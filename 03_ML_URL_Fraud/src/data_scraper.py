@@ -174,12 +174,12 @@ _ipinfo_handler = ipinfo.getHandler(IPINFO_KEY)
 
 def get_ip_asn_features(ip: str) -> dict:
     features = {
-        "asn_org":               None,
-        "country_code":          None,
-        "region":                None,
-        "is_hosting_provider":   0,
-        "is_high_risk_asn":      0,
-        "is_cloudflare_ip":      0,
+        "asn_org":None,
+        "country_code":None,
+        "region":None,
+        "is_hosting_provider":0,
+        "is_high_risk_asn":0,
+        "is_cloudflare_ip":0,
     }
     if not ip:
         return features
@@ -187,23 +187,22 @@ def get_ip_asn_features(ip: str) -> dict:
     try:
         details = _ipinfo_handler.getDetails(ip)
         org = getattr(details, "org", "") or ""
-        features["asn_org"]      = org
+        features["asn_org"] = org
         features["country_code"] = getattr(details, "country", None)
-        features["region"]       = getattr(details, "region", None)
+        features["region"]= getattr(details, "region", None)
 
         org_lower = org.lower()
         asn = org_lower.split()[0] if org_lower else ""
 
-        features["is_cloudflare_ip"]    = int("cloudflare" in org_lower)
+        features["is_cloudflare_ip"]= int("cloudflare" in org_lower)
         features["is_hosting_provider"] = int(
             any(kw in org_lower for kw in HOSTING_KEYWORDS)
         )
-        features["is_high_risk_asn"]    = int(asn in HIGH_RISK_ASNS)
+        features["is_high_risk_asn"]= int(asn in HIGH_RISK_ASNS)
     except Exception:
         pass
 
     return features
-
 
 def process_row(row_tuple: tuple, cache: dict) -> dict:
     idx, url = row_tuple
@@ -265,7 +264,7 @@ def main():
             completed += 1
             if completed % 500 == 0:
                 log.info(f"Progress: {completed}/{len(rows)} done")
-                save_cache(cache, CACHE_FILE)   # checkpoint every 500
+                save_cache(cache, CACHE_FILE) # checkpoint every 500
 
     save_cache(cache, CACHE_FILE)
     log.info("Cache saved.")
