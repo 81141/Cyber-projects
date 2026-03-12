@@ -7,10 +7,8 @@ import ipinfo
 import vt
 import time
 
-
 df = pd.read_csv("../data/lexical_features.csv")
 df = df.sample(n=2_000, random_state=42)
-
 
 #load API keys
 
