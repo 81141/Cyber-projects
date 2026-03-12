@@ -1,4 +1,4 @@
-import whois
+import whoisit
 import pandas as pd
 import numpy as np
 from datetime import datetime

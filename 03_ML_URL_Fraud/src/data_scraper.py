@@ -1,281 +1,115 @@
-import ssl
-import socket
-import json
-import time
-import logging
-from pathlib import Path
-from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import dns.resolver
-import dns.exception
-import tldextract
-import ipinfo
+import whoisit
 import pandas as pd
+import numpy as np
+from datetime import datetime
+import socket
+import ipinfo
+import time
+from urllib.parse import urlparse
+
+df = pd.read_csv("../data/lexical_features.csv")
+df = df.sample(n=2_000, random_state=42)
+
+# Load API keys
+def load_key(path):
+    with open(path, "r") as f:
+        return f.read().strip()
+
+IPINFO_KEY = load_key("../keys/API_TOKEN.txt")
+handler = ipinfo.getHandler(IPINFO_KEY)
 
 
-INPUT_CSV  = "../data/lexical_features.csv"
-OUTPUT_CSV = "../data/cyber_features.csv"
-CACHE_FILE  = "../data/cyber_cache.json"
-IPINFO_KEY  = open("../keys/API_TOKEN.txt").read().strip()
-
-MAX_WORKERS = 20 # to run in parallel to reduce run time 
-DNS_TIMEOUT = 3       
-TLS_TIMEOUT = 4       
-
-CLOUDFLARE_ORGS = {"cloudflare"}
-HOSTING_KEYWORDS = {"amazonaws", "digitalocean", "linode", "vultr", "ovh",
-                    "hetzner", "hostgator", "bluehost", "namecheap", "godaddy"}
-
-HIGH_RISK_ASNS = {"as3267", "as9009", "as59796", "as204655", "as48721"}
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger(__name__)
-
-def load_cache(path: str) -> dict:
-    p = Path(path)
-    if p.exists():
-        try:
-            return json.loads(p.read_text())
-        except Exception:
-            return {}
-    return {}
-
-def save_cache(cache: dict, path: str):
-    Path(path).write_text(json.dumps(cache, indent=2))
-
-#extract registered domain from any URL format
-def extract_domain(url: str) -> str:
-    if not isinstance(url, str):
-        return ""
-    ext = tldextract.extract(url)
-    if ext.domain and ext.suffix:
-        return f"{ext.domain}.{ext.suffix}"
-    return ext.domain or "" # fallback padding to prevent NONE
-
-# this is for DNS lookup extracting hostname and subdomains
-def extract_fqdn(url: str) -> str:
-    ext = tldextract.extract(url)
-    parts = [p for p in [ext.subdomain, ext.domain, ext.suffix] if p]
-    return ".".join(parts)
-
-def get_dns_features(fqdn: str) -> dict:
-    features = {
-        "has_a_record":0,
-        "a_record_count":0,
-        "resolved_ip":None,
-        "has_mx_record":0,
-        "ns_count":0,
-        "min_ttl":-1,
-        "uses_cloudflare":0,
-    }
-    if not fqdn:
-        return features
-
-    resolver = dns.resolver.Resolver()
-    resolver.lifetime = DNS_TIMEOUT
-
-#? A record
+def extract_domain(url):
     try:
-        a_ans = resolver.resolve(fqdn, "A")
-        ips = [r.address for r in a_ans]
-        features["has_a_record"]= 1
-        features["a_record_count"] = len(ips)
-        features["resolved_ip"] = ips[0] if ips else None
-        features["min_ttl"]= a_ans.rrset.ttl if a_ans.rrset else -1
+        if not url.startswith(("http://", "https://")):
+            url = "http://" + url
+        parsed = urlparse(url)
+        domain = parsed.netloc
+        if domain.startswith("www."):
+            domain = domain[4:]
+        return domain if domain else None
     except Exception:
-        pass
+        return None
 
-#? MX record
+df["domain"] = df["url"].apply(extract_domain)
+print(f"Domains extracted: {df['domain'].notna().sum()} / {len(df)}")
+
+
+whoisit.bootstrap()  # load IANA bootstrap data once
+whois_cache = {}
+
+def get_domain_age(domain):
+    if not domain:
+        return -1
+    if domain in whois_cache:
+        return whois_cache[domain]
     try:
-        mx_ans = resolver.resolve(fqdn, "MX")
-        features["has_mx_record"] = 1 if mx_ans else 0
+        r = whoisit.domain(domain)
+        creation = r.get('registration_date')
+        age = (datetime.now(creation.tzinfo) - creation).days if creation else -1
     except Exception:
-        pass
+        age = -1
 
-#? NS record
+    whois_cache[domain] = age
+    time.sleep(0.1)
+    return age
+
+df["domain_age_days"] = df["domain"].apply(get_domain_age)
+print(f"WHOIS done. Non-(-1) results: {(df['domain_age_days'] != -1).sum()}")
+
+
+def resolve_ip(domain):
+    if not domain:
+        return None
     try:
-        ns_ans = resolver.resolve(fqdn, "NS")
-        ns_names = [str(r.target).lower() for r in ns_ans]
-        features["ns_count"] = len(ns_names)
-        features["uses_cloudflare"] = int(
-            any("cloudflare" in ns for ns in ns_names)
-        )
+        return socket.gethostbyname(domain)
     except Exception:
-        pass
+        return None
 
-    return features
+df["ip"] = df["domain"].apply(resolve_ip)
+print(f"IPs resolved: {df['ip'].notna().sum()} / {len(df)}")
 
-def get_cert_features(fqdn: str) -> dict:
-    features = {
-        "has_https":0,
-        "cert_age_days":-1,
-        "cert_days_until_expiry":-1,
-        "is_self_signed":0,
-        "issuer_is_letsencrypt":0,
-        "is_wildcard_cert":0,
-        "issuer_org":None,
-    }
-    if not fqdn:
-        return features
 
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE # we still inspect even bad certs
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    try:
-        with socket.create_connection((fqdn, 443), timeout=TLS_TIMEOUT) as sock:
-            with ctx.wrap_socket(sock, server_hostname=fqdn) as ssock:
-                cert = ssock.getpeercert()
-
-        if not cert:
-            return features
-
-        features["has_https"] = 1
-
-        # Parse not_before / not_after
-        fmt = "%b %d %H:%M:%S %Y %Z" #? EX -> "Jan  5 12:00:00 2024 GMT"
-        now = datetime.now(timezone.utc)
-
-        not_before_str = cert.get("notBefore", "")
-        not_after_str  = cert.get("notAfter", "")
-
-        if not_before_str:
-            not_before = datetime.strptime(not_before_str, fmt).replace(tzinfo=timezone.utc)
-            features["cert_age_days"] = (now - not_before).days
-
-        if not_after_str:
-            not_after = datetime.strptime(not_after_str, fmt).replace(tzinfo=timezone.utc)
-            features["cert_days_until_expiry"] = (not_after - now).days
-
-        # Issuer
-        issuer = dict(x[0] for x in cert.get("issuer", []))
-        org = issuer.get("organizationName", "") or ""
-        features["issuer_org"] = org
-        features["is_self_signed"] = int(
-            issuer.get("commonName", "") == dict(x[0] for x in cert.get("subject", [])).get("commonName", "X")
-        )
-        features["issuer_is_letsencrypt"] = int("let's encrypt" in org.lower())
-
-        # Wildcard check via SAN or subject CN
-        subject = dict(x[0] for x in cert.get("subject", []))
-        cn = subject.get("commonName", "")
-        san_list = [v for (k, v) in cert.get("subjectAltName", []) if k == "DNS"]
-        all_names = [cn] + san_list
-        features["is_wildcard_cert"] = int(any(n.startswith("*") for n in all_names))
-
-    except Exception:
-        pass  # domain just doesn't support HTTPS or timed out
-
-    return features
-
-# IP / ASN FEATURES 
-
-_ipinfo_handler = ipinfo.getHandler(IPINFO_KEY)
-
-def get_ip_asn_features(ip: str) -> dict:
-    features = {
-        "asn_org":None,
-        "country_code":None,
-        "region":None,
-        "is_hosting_provider":0,
-        "is_high_risk_asn":0,
-        "is_cloudflare_ip":0,
-    }
+def get_ip_osint(ip):
     if not ip:
-        return features
-
+        return (None, None, None)
     try:
-        details = _ipinfo_handler.getDetails(ip)
-        org = getattr(details, "org", "") or ""
-        features["asn_org"] = org
-        features["country_code"] = getattr(details, "country", None)
-        features["region"]= getattr(details, "region", None)
-
-        org_lower = org.lower()
-        asn = org_lower.split()[0] if org_lower else ""
-
-        features["is_cloudflare_ip"]= int("cloudflare" in org_lower)
-        features["is_hosting_provider"] = int(
-            any(kw in org_lower for kw in HOSTING_KEYWORDS)
-        )
-        features["is_high_risk_asn"]= int(asn in HIGH_RISK_ASNS)
+        details = handler.getDetails(ip)
+        return (details.org, details.country, details.region)
     except Exception:
-        pass
+        return (None, None, None)
 
-    return features
+ips = df["ip"].tolist()
+results = [None] * len(ips)
 
-def process_row(row_tuple: tuple, cache: dict) -> dict:
-    idx, url = row_tuple
-    domain = extract_domain(url)
-    fqdn   = extract_fqdn(url)
+with ThreadPoolExecutor(max_workers=20) as executor:
+    future_to_idx = {executor.submit(get_ip_osint, ip): i for i, ip in enumerate(ips)}
+    for future in as_completed(future_to_idx):
+        i = future_to_idx[future]
+        results[i] = future.result()
 
-    result = {"url": url, "domain_extracted": domain}
-
-    cache_key = fqdn or domain
-    if cache_key and cache_key in cache:
-        return {**result, **cache[cache_key]}
-
-    dns_feats  = get_dns_features(fqdn)
-    cert_feats = get_cert_features(fqdn)
-    resolved_ip = dns_feats.get("resolved_ip")
-    if not resolved_ip and fqdn:
-        try:
-            resolved_ip = socket.gethostbyname(fqdn)
-        except Exception:
-            pass
-    ipasn_feats = get_ip_asn_features(resolved_ip)
-
-    combined = {**dns_feats, **cert_feats, **ipasn_feats}
-
-    if cache_key:
-        cache[cache_key] = combined
-
-    return {**result, **combined}
+df["asn_org"]  = [r[0] for r in results]
+df["country"]  = [r[1] for r in results]
+df["region"]   = [r[2] for r in results]
+print(f"IPInfo done. ASN results: {df['asn_org'].notna().sum()} / {len(df)}")
 
 
-def main():
-    log.info("Loading dataset...")
-    df = pd.read_csv(INPUT_CSV)
-    log.info(f"Loaded {len(df)} rows")
+df["is_dga_like"] = (df["domain_entropy"] > 3.8).astype(int)
 
-    cache = load_cache(CACHE_FILE)
-    log.info(f"Cache loaded: {len(cache)} existing entries")
+df["suspicious_domain"] = (
+    (df["domain_age_days"] >= 0) &   # only flag when WHOIS data is available
+    (df["domain_age_days"] < 30) &
+    (df["is_dga_like"] == 1)
+).astype(int)
 
-    rows = list(enumerate(df["url"]))
-    results = [None] * len(rows)
-    completed = 0
 
-    log.info(f"Starting parallel extraction with {MAX_WORKERS} workers...")
+from pathlib import Path
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_idx = {
-            executor.submit(process_row, row_tuple, cache): row_tuple[0]
-            for row_tuple in rows
-        }
+output_file = Path("../data/Passive_features.csv")
+if output_file.exists():
+    output_file.unlink()
 
-        for future in as_completed(future_to_idx):
-            idx = future_to_idx[future]
-            try:
-                results[idx] = future.result()
-            except Exception as e:
-                log.warning(f"Row {idx} failed: {e}")
-                results[idx] = {"url": df["url"].iloc[idx]}
-
-            completed += 1
-            if completed % 500 == 0:
-                log.info(f"Progress: {completed}/{len(rows)} done")
-                save_cache(cache, CACHE_FILE) # checkpoint every 500
-
-    save_cache(cache, CACHE_FILE)
-    log.info("Cache saved.")
-
-    cyber_df = pd.DataFrame([r for r in results if r])
-    out_df = df.merge(cyber_df, on="url", how="left")
-
-    out_df.to_csv(OUTPUT_CSV, index=False)
-    log.info(f"Done! Saved to {OUTPUT_CSV}")
-    log.info(f"Output shape: {out_df.shape}")
-    log.info(f"\nNew columns added:\n{[c for c in out_df.columns if c not in df.columns]}")
-
-if __name__ == "__main__":
-    main()
+df.to_csv(output_file, index=False)
+print(f"Saved to {output_file}  |  shape: {df.shape}")
