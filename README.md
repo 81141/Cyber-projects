@@ -109,6 +109,6 @@ print('Predicted class:', le.inverse_transform(prediction))
 ## Limitations
 
 - Passive OSINT enrichment was run on a 2k sample due to API rate limits
-- WHOIS lookups fail on dead/taken-down malicious domains (expected behaviour — missing WHOIS is itself a signal)
-- VirusTotal enrichment was excluded due to free tier rate limits (4 req/min), but is implemented in the codebase
+- WHOIS lookups fail on dead/taken-down malicious domains
+- VirusTotal enrichment was excluded due to free tier rate limits (4 req/min)
 - The enriched model scores slightly lower than the base model due to limited sample size, not because OSINT features are unhelpful
