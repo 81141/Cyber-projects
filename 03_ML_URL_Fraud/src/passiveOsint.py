@@ -32,7 +32,7 @@ def get_domain_age(domain):
         return whois_cache[domain]
 
     try:
-        w = whois.whois(domain)
+        w = whoisit.whois(domain)
         creation = w.creation_date
         if isinstance(creation, list):
             creation = creation[0]
