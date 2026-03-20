@@ -36,3 +36,6 @@ keys/*.txt
 *API_TOKEN.txt
 
 *.tex
+
+*03_ML_URL_Fraud/Model/RandomForest_model.pkl
+*03_ML_URL_Fraud/Model/xgb_model.pkl
